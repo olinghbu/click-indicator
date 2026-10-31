@@ -2,18 +2,22 @@
 // Muestra cuándo tienes que dar click en Slaughterhouse (ID 27690100).
 //
 // Los clicks se guían por "ticks" de física (m_gameState.m_currentProgress,
-// 240 por segundo), que es lo mismo que usan los bots (formato GDR), así que
-// la guía es exacta y no depende de tus FPS.
+// 240 por segundo), que es lo mismo que usan los bots, así que la guía es
+// exacta y no depende de tus FPS.
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
+#include <Geode/modify/PauseLayer.hpp>
+
+#include "formats.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
-#include <functional>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -25,39 +29,55 @@ namespace {
 constexpr int TPS = 240;                 // ticks de física por segundo en 2.2
 constexpr float TICK_MS = 1000.f / TPS;  // ~4.17 ms
 
+// Calidad de la posición de un click en el nivel
+enum : uint8_t {
+    POS_NONE = 0,    // no se sabe: se estima con la velocidad del jugador
+    POS_EXACT = 1,   // grabada en un run válido / calibración / frameFixes
+    POS_LEARNED = 2, // donde estabas tú en ese tick (casi siempre bien)
+};
+
 struct Input {
     int tick = 0;
     bool down = true;
     bool p1 = true;
-    bool hasPos = false;
+    uint8_t pos = POS_NONE;
     float x = 0.f;
     float y = 0.f;
+
+    bool hasPos() const { return pos != POS_NONE; }
 };
 
 struct Config {
-    bool timeline = true;
-    bool big = true;
+    bool timeline = false;
+    bool big = false;
     bool world = true;
-    bool timing = true;
+    bool timing = false;
     bool squares = true;
     bool nowLine = true;
     bool record = true;
     float lookahead = 0.6f;
-    bool playerLine = true;
 };
+
+enum class Source { None, Run, Macro };
 
 struct State {
     bool active = false;          // estamos en el nivel objetivo
     Config cfg;
 
     std::vector<Input> guide;     // clicks que se muestran (ordenados por tick)
-    std::string guideSource;      // "tu run", "macro", ...
-    std::filesystem::path cachePath; // posiciones aprendidas de un macro
-    bool learned = false;
+    Source source = Source::None;
+    std::string sourceName;       // "tu run", "macro GDR2 (xdBot)", ...
+    std::filesystem::path cachePath; // posiciones guardadas del macro
+    bool cacheDirty = false;
     bool guideHasP2 = false;
 
     std::vector<Input> recording; // run que estás grabando ahora
     bool recValid = false;        // empezó desde 0% sin start pos
+
+    // calibración: el mod reproduce el macro una vez para medir las posiciones
+    bool calibrating = false;
+    bool injecting = false;
+    size_t playIdx = 0;
 
     bool startPos = false;
     bool held[2] = {false, false}; // tu input real (p1, p2)
@@ -111,8 +131,24 @@ int currentTick(GJBaseGameLayer* layer) {
     return (int)layer->m_gameState.m_currentProgress;
 }
 
+int countPresses(std::vector<Input> const& v) {
+    return (int)std::count_if(v.begin(), v.end(), [](Input const& i) { return i.down; });
+}
+
+void notify(std::string const& text, NotificationIcon icon = NotificationIcon::None) {
+    Notification::create(text, icon)->show();
+}
+
 // ---------------------------------------------------------- leer / guardar
 
+bool readBytes(std::filesystem::path const& path, std::vector<uint8_t>& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return true;
+}
+
+// Archivo de texto del mod: "tick down p1 pos x y"
 std::vector<Input> parseTxt(std::string const& str) {
     std::vector<Input> out;
     std::istringstream ss(str);
@@ -121,55 +157,24 @@ std::vector<Input> parseTxt(std::string const& str) {
         if (line.empty() || line[0] == '#') continue;
         std::istringstream ls(line);
         Input in;
-        int down = 1, p1 = 1, hasPos = 0;
+        int down = 1, p1 = 1, pos = 0;
         if (!(ls >> in.tick >> down >> p1)) continue;
-        ls >> hasPos >> in.x >> in.y;
+        if (ls >> pos >> in.x >> in.y) in.pos = (uint8_t)std::clamp(pos, 0, 2);
         in.down = down != 0;
         in.p1 = p1 != 0;
-        in.hasPos = hasPos != 0 && ls;
         out.push_back(in);
     }
     return out;
 }
 
-std::string toTxt(std::vector<Input> const& inputs) {
-    std::string out = "# click-indicator v1 (tps 240)\n# tick down p1 hasPos x y\n";
+std::string toTxt(std::vector<Input> const& inputs, std::string const& header = "") {
+    std::string out = "# click-indicator v2 (tps 240)\n# tick down p1 pos(0 nada, 1 exacta, 2 aprendida) x y\n";
+    out += header;
     for (auto const& in : inputs) {
         out += fmt::format("{} {} {} {} {:.2f} {:.2f}\n",
-            in.tick, in.down ? 1 : 0, in.p1 ? 1 : 0, in.hasPos ? 1 : 0, in.x, in.y);
+            in.tick, in.down ? 1 : 0, in.p1 ? 1 : 0, (int)in.pos, in.x, in.y);
     }
     return out;
-}
-
-// Macro GDR en JSON (xdBot y otros): { "framerate": 240, "inputs": [ { "frame", "btn", "2p", "down" } ] }
-Result<std::vector<Input>> parseGDR(std::string const& str) {
-    auto json = GEODE_UNWRAP(matjson::parse(str).mapErr([](auto const&) {
-        return std::string("el archivo no es un JSON válido");
-    }));
-    if (!json.isObject() || !json.contains("inputs")) {
-        return Err("el JSON no tiene \"inputs\" (¿es un macro GDR?)");
-    }
-    double fps = TPS;
-    if (json.contains("framerate")) {
-        fps = json["framerate"].asDouble().unwrapOr((double)TPS);
-        if (fps <= 0) fps = TPS;
-    }
-    auto arr = GEODE_UNWRAP(json["inputs"].asArray());
-
-    std::vector<Input> out;
-    out.reserve(arr.size());
-    for (auto const& item : arr) {
-        if (!item.isObject() || !item.contains("frame")) continue;
-        int btn = item.contains("btn") ? (int)item["btn"].asInt().unwrapOr(1) : 1;
-        if (btn != 1) continue; // solo el botón de salto
-        Input in;
-        double frame = item["frame"].asDouble().unwrapOr(0.0);
-        in.tick = (int)std::lround(frame * TPS / fps);
-        in.down = item.contains("down") ? item["down"].asBool().unwrapOr(true) : true;
-        in.p1 = item.contains("2p") ? !item["2p"].asBool().unwrapOr(false) : true;
-        out.push_back(in);
-    }
-    return Ok(std::move(out));
 }
 
 void sortGuide() {
@@ -179,47 +184,72 @@ void sortGuide() {
     g.guideHasP2 = std::any_of(g.guide.begin(), g.guide.end(), [](Input const& i) { return !i.p1; });
 }
 
+bool guideComplete() {
+    return std::all_of(g.guide.begin(), g.guide.end(), [](Input const& i) { return i.pos == POS_EXACT; });
+}
+
+// Hash del contenido del macro, para que las posiciones guardadas solo se
+// usen con ese mismo macro.
+uint64_t fnv1a(std::vector<uint8_t> const& d) {
+    uint64_t h = 1469598103934665603ull;
+    for (auto b : d) { h ^= b; h *= 1099511628211ull; }
+    return h;
+}
+
+void saveCache() {
+    if (g.source != Source::Macro || g.cachePath.empty() || !g.cacheDirty) return;
+    (void)file::writeString(g.cachePath, toTxt(g.guide));
+    g.cacheDirty = false;
+}
+
 void loadGuide(GJGameLevel* level) {
     g.guide.clear();
-    g.guideSource.clear();
+    g.source = Source::None;
+    g.sourceName.clear();
+    g.cachePath.clear();
 
     auto imp = Mod::get()->getSettingValue<std::filesystem::path>("import-file");
     std::error_code ec;
     if (!imp.empty() && std::filesystem::is_regular_file(imp, ec)) {
-        auto str = file::readString(imp);
-        if (str) {
-            auto ext = lower(imp.extension().string());
-            if (ext == ".json") {
-                auto res = parseGDR(str.unwrap());
-                if (res) {
-                    g.guide = std::move(res).unwrap();
-                    g.guideSource = "macro";
-                } else {
-                    Notification::create(fmt::format("Macro: {}", res.unwrapErr()), NotificationIcon::Error)->show();
-                }
-            } else {
-                g.guide = parseTxt(str.unwrap());
-                g.guideSource = "importado";
+        std::vector<uint8_t> bytes;
+        cifmt::Macro macro;
+        std::string err = readBytes(imp, bytes) ? cifmt::loadMacro(bytes, macro) : "no se pudo abrir el archivo";
+        if (!err.empty()) {
+            notify(fmt::format("Click Indicator: el macro no sirve: {}", err), NotificationIcon::Error);
+        } else {
+            for (auto const& m : macro.inputs) {
+                Input in;
+                in.tick = (int)m.tick;
+                in.down = m.down;
+                in.p1 = m.p1;
+                if (m.hasPos) { in.pos = POS_EXACT; in.x = m.x; in.y = m.y; }
+                g.guide.push_back(in);
             }
-        }
-    }
+            sortGuide();
+            g.source = Source::Macro;
+            g.sourceName = macro.bot.empty() ? fmt::format("macro {}", macro.format)
+                                             : fmt::format("macro {} de {}", macro.format, macro.bot);
+            if (std::abs(macro.fps - TPS) > 0.5) {
+                notify(fmt::format("Click Indicator: el macro es de {} TPS; los tiempos se ajustaron a 240 y pueden fallar por 1 tick", (int)macro.fps));
+            }
+            if (macro.levelID > 0 && macro.levelID != level->m_levelID.value()) {
+                notify(fmt::format("Click Indicator: este macro es de otro nivel (ID {})", macro.levelID), NotificationIcon::Warning);
+            }
 
-    // Un macro solo trae tiempos. Las posiciones se aprenden al jugar y se
-    // guardan aparte para que las columnas salgan por delante la próxima vez.
-    if (!g.guide.empty()) {
-        sortGuide();
-        int id = level->m_levelID.value();
-        g.cachePath = Mod::get()->getSaveDir() / fmt::format("macro_pos_{}_{}.txt", id,
-            std::hash<std::string>{}(imp.filename().string()) % 100000);
-        if (std::filesystem::is_regular_file(g.cachePath, ec)) {
-            if (auto str = file::readString(g.cachePath)) {
-                auto cached = parseTxt(str.unwrap());
-                if (cached.size() == g.guide.size()) {
-                    for (size_t i = 0; i < cached.size(); ++i) {
-                        if (cached[i].tick == g.guide[i].tick && cached[i].hasPos) {
-                            g.guide[i].hasPos = true;
-                            g.guide[i].x = cached[i].x;
-                            g.guide[i].y = cached[i].y;
+            // posiciones guardadas de este mismo macro (calibración / aprendidas)
+            g.cachePath = Mod::get()->getSaveDir() /
+                fmt::format("macro_pos_{}_{:016x}.txt", level->m_levelID.value(), fnv1a(bytes));
+            if (std::filesystem::is_regular_file(g.cachePath, ec)) {
+                if (auto str = file::readString(g.cachePath)) {
+                    auto cached = parseTxt(str.unwrap());
+                    if (cached.size() == g.guide.size()) {
+                        for (size_t i = 0; i < cached.size(); ++i) {
+                            auto& gi = g.guide[i];
+                            auto const& ci = cached[i];
+                            if (ci.tick != gi.tick || ci.down != gi.down) continue;
+                            if (ci.pos == POS_NONE) continue;
+                            if (gi.pos == POS_EXACT && ci.pos != POS_EXACT) continue;
+                            gi.pos = ci.pos; gi.x = ci.x; gi.y = ci.y;
                         }
                     }
                 }
@@ -232,7 +262,10 @@ void loadGuide(GJGameLevel* level) {
         if (std::filesystem::is_regular_file(path, ec)) {
             if (auto str = file::readString(path)) {
                 g.guide = parseTxt(str.unwrap());
-                g.guideSource = "tu run";
+                if (!g.guide.empty()) {
+                    g.source = Source::Run;
+                    g.sourceName = "tu run";
+                }
             }
         }
     }
@@ -348,7 +381,6 @@ void drawTimeline(int t, CCSize win) {
                 float a = xOf(holdFrom), b = xOf(in.tick);
                 if (b - a > 0.5f) d->drawRect(CCRect(a, y0, b - a, y1 - y0), c4(60, 230, 110, 0.45f), 0.f, c4(0, 0, 0, 0));
             }
-            // marcas de press / release
             float x = xOf(in.tick);
             if (in.down) d->drawSegment({x, y0}, {x, y1}, 1.4f, c4(80, 255, 130));
             else d->drawSegment({x, y0 + 2.f}, {x, y1 - 2.f}, 0.9f, c4(255, 70, 70));
@@ -359,7 +391,6 @@ void drawTimeline(int t, CCSize win) {
         }
     }
 
-    // línea de "ahora"
     d->drawSegment({nowX, barY - 3.f}, {nowX, barY + barH + 3.f}, 1.2f, c4(255, 255, 255));
 }
 
@@ -373,22 +404,19 @@ void drawBig(int t, CCSize win) {
     CCPoint c = {win.width - 42.f, 44.f};
     bool should = expectedHeld(t, true);
     bool real = g.held[0];
-    int justPressed = lastPressWithin(t, true, 6);   // ~25 ms de flash
+    int justPressed = lastPressWithin(t, true, 6);
     int next = nextPress(t, true);
 
-    // anillo exterior = tu input real (verde si coincide con lo esperado)
     ccColor4F ring = (should == real) ? c4(80, 255, 130, 0.9f) : c4(255, 70, 70, 0.9f);
     if (!real && !should) ring = c4(255, 255, 255, 0.25f);
     d->drawCircle(c, 26.f, c4(0, 0, 0, 0), 3.f, ring, 40);
 
-    // círculo interior = lo que deberías hacer
     ccColor4F fill = should ? c4(60, 230, 110, 0.95f) : c4(25, 25, 25, 0.7f);
     float r = 20.f;
     if (justPressed >= 0) {
         fill = c4(255, 255, 255, 1.f);
         r = 23.f;
     } else if (!should && next >= 0 && next - t <= 24) {
-        // se acerca un click: se va llenando
         float k = 1.f - (next - t) / 24.f;
         fill = c4((int)(25 + 35 * k), (int)(25 + 205 * k), (int)(25 + 85 * k), 0.7f + 0.25f * k);
     }
@@ -398,15 +426,10 @@ void drawBig(int t, CCSize win) {
     if (justPressed >= 0) text = "CLICK!";
     else if (should) text = "MANTEN";
     else if (next >= 0) text = fmt::format("{}ms", (int)std::lround((next - t) * TICK_MS));
-    else text = "";
     g.bigLabel->setString(text.c_str());
     g.bigLabel->setPosition({c.x, c.y + 36.f});
 }
 
-// Estilo de la foto: cada click es una línea verde vertical que cruza toda la
-// pantalla, el tiempo que mantienes es una columna verde transparente, hay un
-// cuadradito en la altura donde estaba el jugador y una línea blanca en el
-// jugador como referencia de "ahora".
 // Estilo "Click Indicator Redux": columnas verdes en el nivel.
 // Cada hold (presionar -> soltar) es una franja verde translúcida de arriba a
 // abajo de la pantalla, con líneas verdes en los bordes y un cuadrito donde
@@ -430,7 +453,7 @@ void drawWorld(PlayLayer* pl) {
     if (g.cfg.world && !g.guide.empty()) {
         // x de un input: la real si la tenemos, si no se estima con la velocidad
         auto xOf = [&](Input const& in, bool& known) -> float {
-            if (in.hasPos) { known = true; return in.x; }
+            if (in.hasPos()) { known = true; return in.x; }
             known = false;
             return px + (in.tick - t) * g.speedPerTick;
         };
@@ -452,13 +475,12 @@ void drawWorld(PlayLayer* pl) {
             bool haveDown[2] = {false, false};
             float downX[2] = {0.f, 0.f};
             for (auto const& in : g.guide) {
-                if (std::abs(in.tick - t) > TPS * 30) { // fuera de ±30 s: solo seguir el estado
-                    int k = in.p1 ? 0 : 1;
-                    if (in.down) { haveDown[k] = true; downX[k] = in.hasPos ? in.x : 0.f; }
+                int k = in.p1 ? 0 : 1;
+                if (std::abs(in.tick - t) > TPS * 30) { // lejos: solo seguir el estado
+                    if (in.down) { haveDown[k] = true; downX[k] = in.hasPos() ? in.x : 0.f; }
                     else haveDown[k] = false;
                     continue;
                 }
-                int k = in.p1 ? 0 : 1;
                 bool known = false;
                 float x = xOf(in, known);
                 if (in.down) {
@@ -486,7 +508,6 @@ void drawWorld(PlayLayer* pl) {
         }
     }
 
-    // línea blanca en la posición actual del jugador
     if (g.cfg.nowLine) {
         d->drawSegment({px, minY}, {px, maxY}, 0.9f, c4(255, 255, 255, 0.85f));
     }
@@ -495,15 +516,21 @@ void drawWorld(PlayLayer* pl) {
 void updateInfo() {
     if (!g.infoLabel) return;
     std::string text;
-    if (g.startPos) {
-        text = "Click Indicator: con start pos solo se ven las marcas del nivel";
+    if (g.calibrating) {
+        text = fmt::format("Click Indicator: CALIBRANDO el macro, no toques nada ({}/{} inputs)",
+            g.playIdx, g.guide.size());
+    } else if (g.startPos) {
+        text = "Click Indicator: con start pos solo se ven las columnas del nivel";
     } else if (g.guide.empty()) {
         text = g.cfg.record
             ? "Click Indicator: sin clicks. Completa el nivel (en practica vale) para grabarlos, o importa un macro."
             : "Click Indicator: sin clicks. Activa 'Grabar mis runs' o importa un macro.";
     } else {
-        int presses = (int)std::count_if(g.guide.begin(), g.guide.end(), [](Input const& i) { return i.down; });
-        text = fmt::format("Click Indicator: {} clicks ({}){}", presses, g.guideSource,
+        std::string extra;
+        if (g.source == Source::Macro) {
+            extra = guideComplete() ? "  [posiciones exactas]" : "  [sin calibrar: pausa > Calibrar]";
+        }
+        text = fmt::format("Click Indicator: {} clicks ({}){}{}", countPresses(g.guide), g.sourceName, extra,
             (g.cfg.record && g.recValid) ? "  [grabando]" : "");
     }
     g.infoLabel->setString(text.c_str());
@@ -520,8 +547,28 @@ Config readConfig() {
     c.nowLine = m->getSettingValue<bool>("show-now-line");
     c.record = m->getSettingValue<bool>("record");
     c.lookahead = (float)m->getSettingValue<double>("lookahead");
-    c.playerLine = m->getSettingValue<bool>("player-line");
     return c;
+}
+
+void stopCalibration(bool success, PlayLayer* pl) {
+    if (!g.calibrating) return;
+    g.calibrating = false;
+    g.injecting = false;
+    g.held[0] = g.held[1] = false;
+    if (success) {
+        // todo lo que se reprodujo quedó con posición exacta
+        g.cacheDirty = true;
+        saveCache();
+        notify("Click Indicator: macro calibrado, todas las columnas están en su sitio", NotificationIcon::Success);
+    } else {
+        g.cacheDirty = true;
+        saveCache();
+        int pct = pl ? pl->getCurrentPercentInt() : 0;
+        notify(fmt::format(
+            "Click Indicator: el macro murió al {}%. Puede ser de otra versión del nivel, de otro TPS o usar otra seed. "
+            "Lo que se alcanzó a medir quedó guardado.", pct), NotificationIcon::Warning);
+    }
+    updateInfo();
 }
 
 } // namespace
@@ -594,6 +641,19 @@ class $modify(CIPlayLayer, PlayLayer) {
         g.lastTick = t - 1;
         if (m_player1) g.lastX = m_player1->getPositionX();
 
+        if (g.calibrating) {
+            if (t <= 0 && !g.startPos) {
+                g.playIdx = 0;
+                g.held[0] = g.held[1] = false;
+            } else {
+                stopCalibration(false, this);
+            }
+            g.recording.clear();
+            g.recValid = false;
+            updateInfo();
+            return;
+        }
+
         if (!m_isPracticeMode || t <= 0) {
             // intento nuevo desde el inicio
             g.recording.clear();
@@ -609,7 +669,7 @@ class $modify(CIPlayLayer, PlayLayer) {
                         Input up = *it;
                         up.down = false;
                         up.tick = t;
-                        up.hasPos = false;
+                        up.pos = POS_NONE;
                         g.recording.push_back(up);
                     }
                     break;
@@ -619,24 +679,34 @@ class $modify(CIPlayLayer, PlayLayer) {
         updateInfo();
     }
 
+    void destroyPlayer(PlayerObject* player, GameObject* object) {
+        PlayLayer::destroyPlayer(player, object);
+        if (!g.active || !g.calibrating) return;
+        if (object == m_anticheatSpike) return; // el juego lo usa al empezar, no es una muerte
+        if (player && player->m_isDead) stopCalibration(false, this);
+    }
+
     void levelComplete() {
-        if (g.active && g.cfg.record && g.recValid && !g.recording.empty()) {
+        if (g.active && g.calibrating) {
+            stopCalibration(true, this);
+        } else if (g.active && g.cfg.record && g.recValid && !g.recording.empty()) {
             auto path = recordPath(m_level);
             auto res = file::writeString(path, toTxt(g.recording));
             if (res) {
-                int presses = (int)std::count_if(g.recording.begin(), g.recording.end(), [](Input const& i) { return i.down; });
-                Notification::create(fmt::format("Click Indicator: run guardado ({} clicks)", presses), NotificationIcon::Success)->show();
+                notify(fmt::format("Click Indicator: run guardado ({} clicks)", countPresses(g.recording)), NotificationIcon::Success);
                 // si no hay macro importado, tu run pasa a ser la guía
-                if (g.guideSource != "macro" && g.guideSource != "importado") {
+                if (g.source != Source::Macro) {
                     g.guide = g.recording;
-                    g.guideSource = "tu run";
+                    g.source = Source::Run;
+                    g.sourceName = "tu run";
                     sortGuide();
                 }
             } else {
-                Notification::create("Click Indicator: no se pudo guardar el run", NotificationIcon::Error)->show();
+                notify("Click Indicator: no se pudo guardar el run", NotificationIcon::Error);
             }
             g.recValid = false;
         }
+        saveCache();
         PlayLayer::levelComplete();
     }
 
@@ -650,6 +720,7 @@ class $modify(CIPlayLayer, PlayLayer) {
         drawTimeline(t, win);
         drawBig(t, win);
         drawWorld(this);
+        if (g.calibrating) updateInfo();
 
         g.timingAge += dt;
         if (g.timingLabel) {
@@ -661,9 +732,7 @@ class $modify(CIPlayLayer, PlayLayer) {
     }
 
     void onQuit() {
-        if (g.active && g.learned && !g.cachePath.empty()) {
-            (void)file::writeString(g.cachePath, toTxt(g.guide));
-        }
+        if (g.active) saveCache();
         g = State{};
         PlayLayer::onQuit();
     }
@@ -671,11 +740,15 @@ class $modify(CIPlayLayer, PlayLayer) {
 
 class $modify(CIBaseGameLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
+        auto pl = PlayLayer::get();
+        bool mine = g.active && pl && static_cast<GJBaseGameLayer*>(pl) == this;
+
+        // durante la calibración solo cuentan los inputs del macro
+        if (mine && g.calibrating && !g.injecting) return;
+
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
 
-        if (!g.active || button != 1) return;
-        auto pl = PlayLayer::get();
-        if (!pl || static_cast<GJBaseGameLayer*>(pl) != this) return;
+        if (!mine || g.injecting || button != 1) return;
 
         int k = isPlayer1 ? 0 : 1;
         if (g.held[k] == down) return; // ignora repeticiones
@@ -691,7 +764,7 @@ class $modify(CIBaseGameLayer, GJBaseGameLayer) {
             in.p1 = isPlayer1;
             auto player = (isPlayer1 || !m_player2) ? m_player1 : m_player2;
             if (player) {
-                in.hasPos = true;
+                in.pos = POS_EXACT;
                 in.x = player->getPositionX();
                 in.y = player->getPositionY();
             }
@@ -699,8 +772,7 @@ class $modify(CIBaseGameLayer, GJBaseGameLayer) {
         }
     }
 
-    // Se llama en cada tick de física: aprovecha para ubicar en el nivel los
-    // clicks de un macro importado (que solo trae tiempos, no posiciones).
+    // Se llama en cada tick de física.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
 
@@ -709,9 +781,27 @@ class $modify(CIBaseGameLayer, GJBaseGameLayer) {
         if (!pl || static_cast<GJBaseGameLayer*>(pl) != this || !m_player1) return;
 
         int t = currentTick(this);
+
+        // Calibración: se reproducen los inputs del macro igual que un bot
+        // (después de processCommands, cuando el tick ya llegó) y se anota
+        // dónde estaba el jugador en cada uno.
+        if (g.calibrating && !m_player1->m_isDead && !m_levelEndAnimationStarted) {
+            while (g.playIdx < g.guide.size() && g.guide[g.playIdx].tick <= t) {
+                auto& in = g.guide[g.playIdx++];
+                auto player = (in.p1 || !m_player2) ? m_player1 : m_player2;
+                in.pos = POS_EXACT;
+                in.x = player->getPositionX();
+                in.y = player->getPositionY();
+                g.injecting = true;
+                // mismo valor que pasa xdBot al reproducir (en niveles de 1 jugador no importa)
+                GJBaseGameLayer::handleButton(in.down, 1, !in.p1);
+                g.injecting = false;
+            }
+        }
+
         if (t <= g.lastTick) return;
 
-        // velocidad horizontal medida (para ubicar clicks de macros por adelantado)
+        // velocidad horizontal medida (para ubicar por adelantado los clicks sin posición)
         float x = m_player1->getPositionX();
         if (g.lastTick >= 0) {
             float v = (x - g.lastX) / (float)(t - g.lastTick);
@@ -719,17 +809,75 @@ class $modify(CIBaseGameLayer, GJBaseGameLayer) {
         }
         g.lastX = x;
 
-        if (g.startPos || g.guide.empty()) { g.lastTick = t; return; }
-        for (size_t i = firstAtOrAfter(g.lastTick + 1); i < g.guide.size() && g.guide[i].tick <= t; ++i) {
-            auto& in = g.guide[i];
-            if (in.hasPos) continue;
-            auto player = (in.p1 || !m_player2) ? m_player1 : m_player2;
-            if (!player) continue;
-            in.hasPos = true;
-            in.x = player->getPositionX();
-            in.y = player->getPositionY();
-            g.learned = true;
+        // Jugando normal: se aprende dónde estabas en el tick de cada click
+        // que todavía no tiene posición, y se guarda para la próxima vez.
+        if (!g.calibrating && !g.startPos && g.source == Source::Macro) {
+            for (size_t i = firstAtOrAfter(g.lastTick + 1); i < g.guide.size() && g.guide[i].tick <= t; ++i) {
+                auto& in = g.guide[i];
+                if (in.hasPos()) continue;
+                auto player = (in.p1 || !m_player2) ? m_player1 : m_player2;
+                if (!player || player->m_isDead) continue;
+                in.pos = POS_LEARNED;
+                in.x = player->getPositionX();
+                in.y = player->getPositionY();
+                g.cacheDirty = true;
+            }
         }
         g.lastTick = t;
+    }
+};
+
+// ---------------------------------------------------------- botón "Calibrar"
+
+class $modify(CIPauseLayer, PauseLayer) {
+    void customSetup() {
+        PauseLayer::customSetup();
+        if (!g.active || g.source != Source::Macro || g.guide.empty()) return;
+
+        auto win = CCDirector::get()->getWinSize();
+        auto spr = ButtonSprite::create(guideComplete() ? "Recalibrar macro" : "Calibrar macro",
+            "goldFont.fnt", "GJ_button_01.png", 0.7f);
+        spr->setScale(0.6f);
+        auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(CIPauseLayer::onCalibrate));
+        btn->setID("calibrate-button"_spr);
+
+        auto menu = CCMenu::create();
+        menu->setID("click-indicator-menu"_spr);
+        menu->addChild(btn);
+        menu->setPosition({win.width - 70.f, 22.f});
+        this->addChild(menu, 10);
+    }
+
+    void onCalibrate(CCObject*) {
+        auto pl = PlayLayer::get();
+        if (!pl || !g.active || g.guide.empty()) return;
+        if (pl->m_startPosObject) {
+            notify("Click Indicator: quita el start pos para calibrar", NotificationIcon::Warning);
+            return;
+        }
+        createQuickPopup(
+            "Calibrar macro",
+            "El mod va a <cy>reproducir el macro una vez</c> en <cg>modo práctica</c> para medir "
+            "dónde va cada click. No toques nada mientras tanto.\n\nNo cuenta como intento ni como completado.",
+            "Cancelar", "Calibrar",
+            [](auto, bool yes) {
+                if (!yes) return;
+                auto pl = PlayLayer::get();
+                if (!pl || !g.active) return;
+                for (auto& in : g.guide) {
+                    if (in.pos == POS_LEARNED) in.pos = POS_NONE; // se vuelve a medir exacto
+                }
+                if (!pl->m_isPracticeMode) pl->togglePracticeMode(true);
+                pl->removeAllCheckpoints();
+                if (auto pause = CCDirector::get()->getRunningScene()->getChildByType<PauseLayer>(0)) {
+                    pause->onResume(nullptr);
+                }
+                // se activa justo antes de reiniciar para que nada de lo anterior la corte
+                g.calibrating = true;
+                g.playIdx = 0;
+                pl->resetLevelFromStart();
+                updateInfo();
+            }
+        );
     }
 };

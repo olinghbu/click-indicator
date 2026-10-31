@@ -4,7 +4,7 @@
 		"win": "2.2081",
 		"android": "2.2081"
 	},
-	"version": "v0.1.0-alpha.1",
+	"version": "v0.1.0-alpha.2",
 	"id": "olinghbu.click_indicator",
 	"name": "Click Indicator",
 	"developer": "olinghbu",
@@ -75,12 +75,6 @@
 			"description": "Círculo grande que se ilumina cuando tienes que estar presionando. El anillo exterior es tu input real: <cg>verde</c> si coincide, <cr>rojo</c> si no.",
 			"default": false
 		},
-		"player-line": {
-			"type": "bool",
-			"name": "Línea del jugador",
-			"description": "Línea blanca vertical en tu posición para comparar con las columnas.",
-			"default": true
-		},
 		"show-timing": {
 			"type": "bool",
 			"name": "Mostrar precisión",
@@ -112,13 +106,15 @@
 		"import-file": {
 			"type": "file",
 			"name": "Importar macro",
-			"description": "Opcional: un macro <cy>.gdr.json</c> (formato GDR, el de xdBot y otros bots) o un <cy>.txt</c> de este mod. Si está puesto, se usa en vez de tu run grabado.",
+			"description": "Opcional: un macro de bot. Sirve <cy>.gdr</c>, <cy>.gdr2</c> y <cy>.gdr.json</c> (xdBot y otros bots con formato GDR) o un <cy>.txt</c> de este mod. Si está puesto, se usa en vez de tu run grabado. Para que las columnas salgan exactas, en la pausa del nivel usa <cg>Calibrar macro</c>.",
 			"default": "",
 			"control": {
 				"dialog": "open",
 				"filters": [
 					{
 						"files": [
+							"*.gdr",
+							"*.gdr2",
 							"*.json",
 							"*.txt"
 						],

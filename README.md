@@ -1,4 +1,4 @@
-# Click Indicator v0.1.0-alpha.1 (Geode 5.9.0 · GD 2.2081)
+# Click Indicator v0.1.0-alpha.2 (Geode 5.9.0 · GD 2.2081)
 
 Mod de Geode que te indica cuándo dar click. Por ahora solo se activa en **Slaughterhouse** (ID `27690100`, o cualquier nivel llamado "Slaughterhouse" si "Detectar copias" está activado).
 
@@ -18,7 +18,10 @@ Mod de Geode que te indica cuándo dar click. Por ahora solo se activa en **Slau
 El mod **no trae los clicks de Slaughterhouse ya incluidos**. Tiene que sacarlos de un run válido:
 
 1. **Grabando tu run** (activado por defecto): entra al nivel, activa el **modo práctica**, pon checkpoints y llega al 100%. Cuando mueres en un checkpoint, los inputs que vienen después de ese checkpoint se borran, así que lo que se guarda es el run "limpio". Al completar el nivel aparece *"run guardado"* y desde ese intento ya te guía. Se guarda en la carpeta de guardado del mod como `clicks_27690100.txt`.
-2. **Importando un macro**: en ajustes → "Importar macro", elige un `.gdr.json` (formato GDR en JSON, el que exportan xdBot y otros bots) o un `.txt` de este mod. Los macros solo traen tiempos: las columnas se ubican por adelantado con la velocidad del jugador y se corrigen a la posición exacta cuando pasas por ahí (los cuadritos aparecen después de pasar).
+2. **Importando un macro**: en ajustes → "Importar macro". Sirve `.gdr`, `.gdr2` y `.gdr.json` (formato GDR: xdBot y otros bots) o un `.txt` de este mod.
+   - Si el macro trae posiciones (los de xdBot con *frame fixes*), las columnas salen exactas desde el primer intento.
+   - Si no, entra al nivel, pausa y pulsa **Calibrar macro**: el mod reproduce el macro una vez en modo práctica, mide dónde va cada click y lo guarda. No cuenta como intento ni como completado.
+   - Sin calibrar, las columnas se estiman con la velocidad del jugador y las que vas pasando se guardan para la próxima vez.
 
 Los tiempos van por ticks de física (240 por segundo), así que la guía no depende de tus FPS.
 

@@ -1,0 +1,131 @@
+{
+	"geode": "5.9.0",
+	"gd": {
+		"win": "2.2081",
+		"android": "2.2081"
+	},
+	"version": "v0.1.0-alpha.1",
+	"id": "olinghbu.click_indicator",
+	"name": "Click Indicator",
+	"developer": "olinghbu",
+	"description": "Te muestra dónde dar click en Slaughterhouse",
+	"tags": [
+		"gameplay",
+		"utility"
+	],
+	"settings": {
+		"title-general": {
+			"type": "title",
+			"name": "General"
+		},
+		"enabled": {
+			"type": "bool",
+			"name": "Activado",
+			"description": "Activa el indicador de clicks.",
+			"default": true
+		},
+		"level-id": {
+			"type": "int",
+			"name": "ID del nivel",
+			"description": "ID del nivel donde funciona el mod. <cy>27690100</c> es Slaughterhouse de icedcave.",
+			"default": 27690100,
+			"min": 1,
+			"control": {
+				"arrows": false,
+				"slider": false
+			}
+		},
+		"match-name": {
+			"type": "bool",
+			"name": "Detectar copias",
+			"description": "También funciona en niveles llamados <cy>Slaughterhouse</c> (copias, versiones sin decoración, etc.).",
+			"default": true
+		},
+		"title-visual": {
+			"type": "title",
+			"name": "Visual"
+		},
+		"show-world": {
+			"type": "bool",
+			"name": "Columnas en el nivel",
+			"description": "Franjas <cg>verdes</c> en el nivel: cada una va desde donde presionas hasta donde sueltas. Las líneas son el momento exacto del click.",
+			"default": true
+		},
+		"show-squares": {
+			"type": "bool",
+			"name": "Cuadritos de posición",
+			"description": "Cuadrito en cada línea donde estaba el jugador al presionar (relleno) y al soltar (hueco).",
+			"default": true
+		},
+		"show-now-line": {
+			"type": "bool",
+			"name": "Línea blanca del jugador",
+			"description": "Línea vertical blanca en la posición actual del jugador.",
+			"default": true
+		},
+		"show-timeline": {
+			"type": "bool",
+			"name": "Barra de clicks",
+			"description": "Barra abajo de la pantalla con los próximos clicks acercándose a la línea blanca (estilo juego de ritmo). <cg>Verde</c> = mantener, línea <cr>roja</c> = soltar.",
+			"default": false
+		},
+		"show-big": {
+			"type": "bool",
+			"name": "Indicador CLICK",
+			"description": "Círculo grande que se ilumina cuando tienes que estar presionando. El anillo exterior es tu input real: <cg>verde</c> si coincide, <cr>rojo</c> si no.",
+			"default": false
+		},
+		"player-line": {
+			"type": "bool",
+			"name": "Línea del jugador",
+			"description": "Línea blanca vertical en tu posición para comparar con las columnas.",
+			"default": true
+		},
+		"show-timing": {
+			"type": "bool",
+			"name": "Mostrar precisión",
+			"description": "Al dar click muestra si fuiste temprano o tarde y por cuántos milisegundos.",
+			"default": false
+		},
+		"lookahead": {
+			"type": "float",
+			"name": "Anticipación (segundos)",
+			"description": "Cuántos segundos hacia el futuro muestra la barra. Menos = clicks más separados (útil en el wave spam).",
+			"default": 0.6,
+			"min": 0.2,
+			"max": 3.0,
+			"control": {
+				"slider": true,
+				"slider-step": 0.05
+			}
+		},
+		"title-data": {
+			"type": "title",
+			"name": "Datos de clicks"
+		},
+		"record": {
+			"type": "bool",
+			"name": "Grabar mis runs",
+			"description": "Graba tus inputs (sirve en <cy>modo práctica</c> con checkpoints). Al completar el nivel desde 0% se guardan y se usan como guía en los siguientes intentos.",
+			"default": true
+		},
+		"import-file": {
+			"type": "file",
+			"name": "Importar macro",
+			"description": "Opcional: un macro <cy>.gdr.json</c> (formato GDR, el de xdBot y otros bots) o un <cy>.txt</c> de este mod. Si está puesto, se usa en vez de tu run grabado.",
+			"default": "",
+			"control": {
+				"dialog": "open",
+				"filters": [
+					{
+						"files": [
+							"*.json",
+							"*.txt"
+						],
+						"description": "Macro de clicks"
+					}
+				]
+			}
+		}
+	}
+}

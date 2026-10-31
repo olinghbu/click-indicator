@@ -35,10 +35,18 @@ jobs:
       - name: Build the mod
         uses: geode-sdk/build-geode-mod@main
         with:
-          bindings: geode-sdk/bindings
-          bindings-ref: main
           combine: true
           target: ${{ matrix.config.target }}
+
+      - name: Show compile errors
+        if: failure()
+        shell: bash
+        run: |
+          for d in build*; do
+            [ -d "$d" ] || continue
+            cmake --build "$d" --config RelWithDebInfo 2>&1 | grep -iE "error|fatal" | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+          done
+          ls
 
   package:
     name: Package builds

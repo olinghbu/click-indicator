@@ -107,6 +107,10 @@ ccColor4F c4(int r, int g, int b, float a = 1.f) {
     return ccc4f(r / 255.f, g / 255.f, b / 255.f, a);
 }
 
+int currentTick(GJBaseGameLayer* layer) {
+    return (int)layer->m_gameState.m_currentProgress;
+}
+
 // ---------------------------------------------------------- leer / guardar
 
 std::vector<Input> parseTxt(std::string const& str) {
@@ -518,10 +522,6 @@ Config readConfig() {
     c.lookahead = (float)m->getSettingValue<double>("lookahead");
     c.playerLine = m->getSettingValue<bool>("player-line");
     return c;
-}
-
-int currentTick(GJBaseGameLayer* layer) {
-    return (int)layer->m_gameState.m_currentProgress;
 }
 
 } // namespace
